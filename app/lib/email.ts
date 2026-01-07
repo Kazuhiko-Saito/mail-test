@@ -1,5 +1,7 @@
 import POP3Client from "poplib";
 import PostalMime from "postal-mime";
+import jschardet from "jschardet";
+import iconv from "iconv-lite";
 import { prisma } from "./prisma";
 
 const mailsetting = {
@@ -11,96 +13,128 @@ const mailsetting = {
   },
 };
 
-// キーワード
+// 検索用キーワード
 const keywords: string[] = [];
 
-// 抽出
+// 抽出用キーワード
 const regexStrings: string[] = [];
 
 let currentMsgNum: number = 1;
 let totalMsgCount: number = 0;
 
 export const emailProcessor = () => {
-  const client = new POP3Client(
-    mailsetting.server.port,
-    mailsetting.server.name,
-    {
-      tlserrs: false,
-      enabletls: false,
-      debug: false,
-    }
-  );
-
-  client.on("connect",  () => {
-    console.log("CONNECT success");
-    client.login(mailsetting.username, mailsetting.password);
-  });
-
-  client.on("login", (status, rawdata) => {
-    if (status) {
-      console.log("LOGIN/PASS success");
-      client.list();
-    } else {
-      console.log("LOGIN/PASS failed");
-      client.quit();
-    }
-  });
-
-  client.on("list",  (status, msgcount, msgnumber, data, rawdata) => {
-    if (!status) {
-      console.log("LIST failed");
-      client.quit();
-    } else {
-      console.log("LIST success with " + msgcount + " element(s)");
-      // トータルメッセージ数保持
-      totalMsgCount = msgcount;
-      // メッセージがある場合は最初のメッセージ取得
-      if (msgcount > 0) {
-        currentMsgNum = 1;
-        client.retr(currentMsgNum);
-      } else {
-        client.quit();
+  return new Promise<void>((resolve, reject) => {
+    const client = new POP3Client(
+      mailsetting.server.port,
+      mailsetting.server.name,
+      {
+        tlserrs: false,
+        enabletls: false,
+        debug: false,
       }
-    }
-  });
+    );
 
-  client.on("retr", async (status, msgnumber, data, rawdata) => {
-    // 現在のメッセージ番号を保持
-    currentMsgNum = msgnumber;
-    if (!status) {
-      console.log("RETR failed for msgnumber " + msgnumber);
+    client.on("error", (err) => {
+      console.error("POP3 client error:", err);
       client.quit();
-    } else {
-      console.log("RETR success for msgnumber " + msgnumber);
-      // メールを登録
-      if (await storeMail(data)) {
-        // 次のメッセージ取得
-        if (currentMsgNum < totalMsgCount) {
-          currentMsgNum++;
+      reject(err);
+    });
+
+    client.on("connect", () => {
+      console.log("CONNECT success");
+      client.login(mailsetting.username, mailsetting.password);
+    });
+
+    client.on("login", (status, rawdata) => {
+      if (status) {
+        console.log("LOGIN/PASS success");
+        client.list();
+      } else {
+        console.log("LOGIN/PASS failed");
+        client.quit();
+        reject(new Error("LOGIN/PASS failed"));
+      }
+    });
+
+    client.on("list", (status, msgcount, msgnumber, data, rawdata) => {
+      if (!status) {
+        console.log("LIST failed");
+        client.quit();
+        reject(new Error("LIST failed"));
+      } else {
+        console.log("LIST success with " + msgcount + " element(s)");
+        totalMsgCount = msgcount;
+        if (msgcount > 0) {
+          currentMsgNum = 1;
           client.retr(currentMsgNum);
         } else {
-          client.quit();
+          client.quit(); // No messages, we're done.
         }
-      } else {
-        client.quit();
       }
-    }
+    });
+
+    client.on("retr", async (status, msgnumber, data, rawdata) => {
+      currentMsgNum = msgnumber;
+      if (!status) {
+        console.log("RETR failed for msgnumber " + msgnumber);
+        client.quit();
+        reject(new Error(`RETR failed for msgnumber ${msgnumber}`));
+      } else {
+        console.log("RETR success for msgnumber " + msgnumber);
+        try {
+          if (await storeMail(data)) {
+            if (currentMsgNum < totalMsgCount) {
+              currentMsgNum++;
+              client.retr(currentMsgNum);
+            } else {
+              client.quit(); // All messages processed
+            }
+          } else {
+            // storeMail returned false, indicating we should stop.
+            client.quit();
+          }
+        } catch (e) {
+          console.error("Error during storeMail:", e);
+          client.quit();
+          reject(e);
+        }
+      }
+    });
+
+    client.on("quit", (status, rawdata) => {
+      if (status) {
+        console.log("QUIT success");
+        resolve();
+      } else {
+        console.log("QUIT failed");
+        reject(new Error("QUIT failed"));
+      }
+    });
   });
+};
 
-  client.on("quit",  (status, rawdata) => {
-    if (status) {
-      console.log("QUIT success");
-    } else {
-      console.log("QUIT failed");
-    }
-  });
-}
+const storeMail = async (data: string) => {
+  // Bufferにメールデータを入れて文字コード判定
+  const buffer = Buffer.from(data, "binary");
+  const detected = jschardet.detect(buffer);
+  let emailDataString: string;
+  if (
+    detected &&
+    detected.encoding &&
+    detected.confidence > 0.95 &&
+    !["UTF-8", "ASCII"].includes(detected.encoding.toUpperCase()) &&
+    iconv.encodingExists(detected.encoding)
+  ) {
+    console.log(
+      `Detected encoding: ${detected.encoding} (confidence: ${detected.confidence}). Converting to UTF-8.`
+    );
+    emailDataString = iconv.decode(buffer, detected.encoding);
+  } else {
+    emailDataString = buffer.toString("utf8");
+  }
 
-const storeMail = async (data) => {
-  // メールパース
-  const email = await PostalMime.parse(data);
-
-  // メール本文抽出
+  // メールパースと本文抽出
+  const email = await PostalMime.parse(emailDataString);
   const body = email.text || email.html || "";
 
   // デバッグ出力
@@ -121,21 +155,39 @@ const storeMail = async (data) => {
     console.log("必要情報がありません。");
     return true;
   }
+
   // DB登録
   try {
-    prisma.email.create({
-      data: {
-        message_id: email.messageId || "",
-        subjet: email.subject || "",
-        sender: email.from?.name + " <" + email.from?.address + ">" || "",
-        received_at: email.date || "",
-        body: body || "",
-        created_at: new Date(),
+    const cleanMessageId = (email.messageId || "").replace(/\x00/g, "");
+    const cleanSubject = (email.subject || "").replace(/\x00/g, "");
+    const cleanSender =
+      `${email.from?.name || ""} <${email.from?.address || ""}>`.replace(
+        /\x00/g,
+        ""
+      );
+    const cleanBody = (body || "").replace(/\x00/g, "");
+
+    await prisma.email.upsert({
+      where: {
+        message_id: cleanMessageId,
+      },
+      create: {
+        message_id: cleanMessageId,
+        subject: cleanSubject,
+        sender: cleanSender,
+        received_at: email.date ? new Date(email.date) : new Date(),
+        body: cleanBody,
+      },
+      update: {
+        subject: cleanSubject,
+        sender: cleanSender,
+        received_at: email.date ? new Date(email.date) : new Date(),
+        body: cleanBody,
       },
     });
   } catch (error) {
-    console.error("[ERR] ", error.message);
-    return true;
+    console.error("[ERR] ", (error as Error).message);
+    throw error;
   }
   // キーワード検索
   searchKeyword(body);
@@ -153,3 +205,10 @@ const searchKeyword = (body) => {
     }
   });
 };
+
+export const getEmailList = async () => {
+    // 
+    const emails = await prisma.email.findMany();
+    // 
+    return emails;
+}

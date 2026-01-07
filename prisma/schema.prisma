@@ -16,7 +16,7 @@ datasource db {
 model email {
   id          Int      @id @default(autoincrement())
   message_id  String   @unique
-  subjet      String
+  subject     String
   sender      String
   received_at DateTime
   body        String   @db.Text
