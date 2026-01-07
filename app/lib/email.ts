@@ -17,7 +17,9 @@ const mailsetting = {
 const keywords: string[] = [];
 
 // 抽出用キーワード
-const regexStrings: string[] = [];
+const extractions: {name: string, regex: RegExp}[] = [
+  {name: "サンプル", regex: /サンプル/g}
+];
 
 let currentMsgNum: number = 1;
 let totalMsgCount: number = 0;
@@ -68,7 +70,7 @@ export const emailProcessor = () => {
           currentMsgNum = 1;
           client.retr(currentMsgNum);
         } else {
-          client.quit(); // No messages, we're done.
+          client.quit();
         }
       }
     });
@@ -87,10 +89,9 @@ export const emailProcessor = () => {
               currentMsgNum++;
               client.retr(currentMsgNum);
             } else {
-              client.quit(); // All messages processed
+              client.quit();
             }
           } else {
-            // storeMail returned false, indicating we should stop.
             client.quit();
           }
         } catch (e) {
@@ -158,6 +159,7 @@ const storeMail = async (data: string) => {
 
   // DB登録
   try {
+    // NULL文字除去
     const cleanMessageId = (email.messageId || "").replace(/\x00/g, "");
     const cleanSubject = (email.subject || "").replace(/\x00/g, "");
     const cleanSender =
@@ -166,7 +168,7 @@ const storeMail = async (data: string) => {
         ""
       );
     const cleanBody = (body || "").replace(/\x00/g, "");
-
+    // emailテーブルに登録
     await prisma.email.upsert({
       where: {
         message_id: cleanMessageId,
@@ -185,30 +187,81 @@ const storeMail = async (data: string) => {
         body: cleanBody,
       },
     });
-  } catch (error) {
-    console.error("[ERR] ", (error as Error).message);
-    throw error;
+  } catch (e) {
+    console.error("[ERR] ", (e as Error).message);
+    throw e;
   }
   // キーワード検索
-  searchKeyword(body);
+  const tag: string[] | undefined = searchKeyword(body);
 
   // 正規表現で抽出
+  const text: string[] | undefined = extractionRegex(body);
 
   // 正常終了
   return true;
 };
 
-const searchKeyword = (body) => {
+// キーワード検索
+const searchKeyword = (body: string) => {
+  // キーワードチェック
+  if (keywords.length === 0) {
+    return [];
+  }
+
+  // タグ配列
+  const tag: string[] = [];
+  
+  // キーワード検索
   keywords.forEach((keyword) => {
     if (body.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) {
       console.log("Tag: " + keyword);
+      tag.push(keyword);
     }
   });
+  
+  // タグ返却
+  return tag;
 };
 
+// 正規表現で抽出
+const extractionRegex = (body: string) => {
+  // 正規表現チェック
+  if (extractions.length === 0) {
+    return;
+  }
+
+  // 抽出配列
+  const text: string[] = [];
+
+  // 正規表現検索
+  extractions.forEach((extraction) => {
+    const matches = body.match(extraction.regex);
+    if (matches) {
+      matches.forEach((match) => {
+        text.push(match);
+      });
+    }
+  });
+
+  // 抽出配列返却
+  return text;
+};
+
+// メールリスト取得
 export const getEmailList = async () => {
-    // 
-    const emails = await prisma.email.findMany();
-    // 
+    // メールリスト取得
+    const emails = await prisma.email.findMany({
+      select: {
+        message_id: true,
+        subject: true,
+        sender: true,
+        received_at: true,
+      },
+      orderBy: {
+        received_at: 'desc',
+      },
+    });
+
+    // メールリスト返却
     return emails;
 }
