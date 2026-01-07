@@ -1,5 +1,14 @@
 # メールフィルターテスト
 
+## 技術スタック
+
+- PostgreSQL
+- Node.js
+- Next.js
+    - poplib
+    - postal-mime
+    - prisma
+
 ## 環境構築
 
 ```PowerShell
